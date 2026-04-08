@@ -28,9 +28,7 @@ async function startBot() {
         await delay(6000); 
         try {
             const code = await sock.requestPairingCode(phoneNumber);
-            console.log("\n" + "=".repeat(35));
-            console.log("✅ YOUR LINKING CODE:", code);
-            console.log("=".repeat(35) + "\n");
+            console.log("\n✅ YOUR CODE: " + code + "\n");
         } catch (err) {
             console.log("❌ Pairing Failed:", err.message);
         }
@@ -40,9 +38,7 @@ async function startBot() {
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect } = update;
-        if (connection === 'open') {
-            console.log('🚀 BOT ONLINE: Monitoring all incoming packets...');
-        }
+        if (connection === 'open') console.log('🚀 BOT ACTIVE: Monitoring View-Once...');
         if (connection === 'close') {
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
             if (shouldReconnect) startBot();
@@ -54,34 +50,32 @@ async function startBot() {
         if (!msg.message || msg.key.fromMe) return;
 
         const m = msg.message;
-        
-        // --- DEEP SCAN LOGIC ---
-        // This checks top-level AND inside ephemeral wrappers
-        const viewOnceCheck = 
-            m.viewOnceMessageV2 || 
-            m.viewOnceMessage || 
-            m.viewOnceMessageV2Extension || 
-            m.ephemeralMessage?.message?.viewOnceMessageV2 || 
-            m.ephemeralMessage?.message?.viewOnceMessage ||
-            m.ephemeralMessage?.message?.viewOnceMessageV2Extension;
 
-        // Log the packet type for debugging
+        // --- THE "CHATGPT + EXTENSION" FIX ---
+        // We check every possible layer where WhatsApp hides the View-Once message
+        const viewOnceCheck = 
+            m?.viewOnceMessageV2 || 
+            m?.viewOnceMessage || 
+            m?.viewOnceMessageV2Extension ||
+            m?.ephemeralMessage?.message?.viewOnceMessageV2 || 
+            m?.ephemeralMessage?.message?.viewOnceMessage ||
+            m?.ephemeralMessage?.message?.viewOnceMessageV2Extension;
+
+        // LOGGING: This helps us see if the logic above "caught" it
         const rootType = Object.keys(m)[0];
-        console.log(`📩 Raw Packet: ${rootType} | From: ${msg.pushName || 'User'}`);
+        console.log(`📩 Received Packet: ${rootType}`);
 
         if (viewOnceCheck) {
-            console.log("🔓 VIEW-ONCE DETECTED! Unwrapping...");
+            console.log("🔓 VIEW-ONCE DETECTED! Processing...");
 
-            // Get the actual media (image or video)
+            // The media object is always inside the .message property of the wrapper
             const mediaObj = viewOnceCheck.message;
             if (!mediaObj) return;
 
-            const mediaType = Object.keys(mediaObj)[0]; 
+            const mediaType = Object.keys(mediaObj)[0]; // imageMessage or videoMessage
 
             if (mediaType === 'imageMessage' || mediaType === 'videoMessage') {
                 try {
-                    console.log(`⏳ Downloading ${mediaType}...`);
-                    
                     const stream = await downloadContentFromMessage(
                         mediaObj[mediaType], 
                         mediaType === 'imageMessage' ? 'image' : 'video'
@@ -96,16 +90,11 @@ async function startBot() {
                     const isGroup = msg.key.remoteJid.endsWith('@g.us');
                     
                     const payload = {};
-                    if (mediaType === 'imageMessage') payload.image = buffer;
-                    else payload.video = buffer;
-
-                    payload.caption = `🔓 *Anti-ViewOnce Captured*\n\n` +
-                                     `👤 *Sender:* ${msg.pushName || 'Unknown'}\n` +
-                                     `📍 *Chat:* ${isGroup ? 'Group' : 'Private'}\n` +
-                                     `🆔 *Sender ID:* ${msg.key.participant || msg.key.remoteJid}`;
+                    payload[mediaType === 'imageMessage' ? 'image' : 'video'] = buffer;
+                    payload.caption = `🔓 *Anti-ViewOnce Success*\n👤 *From:* ${msg.pushName || 'User'}`;
 
                     await sock.sendMessage(myJid, payload);
-                    console.log("🏁 SUCCESS: Permanent copy sent to your DM.");
+                    console.log("🏁 SUCCESS: Forwarded to your DM.");
                 } catch (e) {
                     console.log("❌ EXTRACTION ERROR:", e.message);
                 }
