@@ -20,15 +20,19 @@ async function startBot() {
         browser: Browsers.macOS('Chrome')
     });
 
+    // Pairing / Handshake
     if (!sock.authState.creds.registered) {
         const phoneNumber = "94723748044"; 
         await delay(6000); 
         const code = await sock.requestPairingCode(phoneNumber);
-        console.log(`\n✅ CODE: ${code}\n`);
+        console.log(`\n✅ LINKING CODE: ${code}\n`);
     }
 
     sock.ev.on('creds.update', saveCreds);
-    sock.ev.on('connection.update', (up) => { if (up.connection === 'close') startBot(); });
+    sock.ev.on('connection.update', (up) => { 
+        if (up.connection === 'open') console.log('🚀 BOT ONLINE: Universal Media Unlocker Ready');
+        if (up.connection === 'close') startBot(); 
+    });
 
     sock.ev.on('messages.upsert', async ({ messages }) => {
         const msg = messages[0];
@@ -40,11 +44,11 @@ async function startBot() {
             const quoted = msg.message.extendedTextMessage?.contextInfo?.quotedMessage;
             if (!quoted) return;
 
-            // 1. Unwrapping multiple layers (View-Once or Ephemeral)
+            // Unwrapping View-Once layers
             const viewOnce = quoted.viewOnceMessageV2 || quoted.viewOnceMessage || quoted.viewOnceMessageV2Extension;
             const target = viewOnce ? viewOnce.message : quoted;
 
-            // 2. DETECT ALL MEDIA TYPES
+            // Detection logic
             const mediaType = 
                 target.imageMessage ? 'image' : 
                 target.videoMessage ? 'video' : 
@@ -53,9 +57,8 @@ async function startBot() {
 
             if (mediaType) {
                 try {
-                    console.log(`🔓 Unlocking View-Once ${mediaType}...`);
+                    console.log(`🔓 Unlocking ${mediaType}...`);
                     
-                    // Get the specific message object (e.g., target.audioMessage)
                     const mediaKey = `${mediaType}Message`;
                     const stream = await downloadContentFromMessage(target[mediaKey], mediaType);
                     
@@ -65,13 +68,12 @@ async function startBot() {
                     const myJid = sock.user.id.split(':')[0] + "@s.whatsapp.net";
                     const payload = {};
 
-                    // 3. CONSTRUCT PAYLOAD BASED ON TYPE
                     if (mediaType === 'image') payload.image = buffer;
                     else if (mediaType === 'video') payload.video = buffer;
                     else if (mediaType === 'audio') {
                         payload.audio = buffer;
-                        payload.mimetype = 'audio/mp4'; // Standard WhatsApp audio mime
-                        payload.ptt = true; // Makes it look like a blue voice note
+                        payload.mimetype = 'audio/mp4';
+                        payload.ptt = true; 
                     } 
                     else if (mediaType === 'document') {
                         payload.document = buffer;
@@ -81,18 +83,17 @@ async function startBot() {
 
                     payload.caption = `🔓 *Universal Unlock Success*\n📂 *Type:* ${mediaType.toUpperCase()}\n👤 *From:* ${msg.pushName}`;
 
-                    // Send to Private DM
+                    // Send to your private DM (Ghost Redirect)
                     await sock.sendMessage(myJid, payload);
                     
-                    // Cleanup: Delete your command so the chat stays clean
-                    await sock.sendMessage(msg.key.remoteJid, { delete: msg.key });
-
+                    // NOTE: Auto-delete line has been removed from here.
+                    
                     console.log(`🏁 ${mediaType.toUpperCase()} sent to private DM.`);
                 } catch (e) { 
                     console.log("❌ Extraction Error:", e.message); 
                 }
             } else {
-                console.log("ℹ️ No compatible media found in reply.");
+                console.log("ℹ️ No media found in quoted message.");
             }
         }
     });
