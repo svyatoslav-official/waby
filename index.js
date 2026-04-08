@@ -17,64 +17,49 @@ async function startBot() {
         version,
         auth: state,
         logger: pino({ level: 'silent' }),
-        printQRInTerminal: false,
-        browser: Browsers.macOS('Chrome'), 
+        browser: Browsers.macOS('Chrome'),
         syncFullHistory: false
     });
 
+    // Pairing Logic
     if (!sock.authState.creds.registered) {
         const phoneNumber = "94723748044"; 
-        console.log("🕒 Waiting 6s for handshake...");
+        console.log("🕒 Handshaking...");
         await delay(6000); 
         try {
             const code = await sock.requestPairingCode(phoneNumber);
-            console.log("\n✅ YOUR CODE: " + code + "\n");
-        } catch (err) {
-            console.log("❌ Pairing Failed:", err.message);
-        }
+            console.log(`\n✅ YOUR PAIRING CODE: ${code}\n`);
+        } catch (err) { console.log("❌ Error:", err.message); }
     }
 
     sock.ev.on('creds.update', saveCreds);
-
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect } = update;
-        if (connection === 'open') console.log('🚀 BOT ACTIVE: Monitoring View-Once...');
-        if (connection === 'close') {
-            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            if (shouldReconnect) startBot();
-        }
+    sock.ev.on('connection.update', (up) => {
+        if (up.connection === 'open') console.log('🚀 BOT READY: Reply to a View-Once with .vv');
+        if (up.connection === 'close') startBot();
     });
 
     sock.ev.on('messages.upsert', async ({ messages }) => {
         const msg = messages[0];
-        if (!msg.message || msg.key.fromMe) return;
+        if (!msg.message) return;
 
-        const m = msg.message;
+        // Get the text from the message (standard or button/template)
+        const body = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
+        const command = body.toLowerCase().trim();
 
-        // --- THE "CHATGPT + EXTENSION" FIX ---
-        // We check every possible layer where WhatsApp hides the View-Once message
-        const viewOnceCheck = 
-            m?.viewOnceMessageV2 || 
-            m?.viewOnceMessage || 
-            m?.viewOnceMessageV2Extension ||
-            m?.ephemeralMessage?.message?.viewOnceMessageV2 || 
-            m?.ephemeralMessage?.message?.viewOnceMessage ||
-            m?.ephemeralMessage?.message?.viewOnceMessageV2Extension;
+        // CHECK FOR COMMAND: .vv
+        if (command === '.vv') {
+            // 1. Check if the user is replying to a message
+            const quotedMsg = msg.message.extendedTextMessage?.contextInfo?.quotedMessage;
+            if (!quotedMsg) return;
 
-        // LOGGING: This helps us see if the logic above "caught" it
-        const rootType = Object.keys(m)[0];
-        console.log(`📩 Received Packet: ${rootType}`);
-
-        if (viewOnceCheck) {
-            console.log("🔓 VIEW-ONCE DETECTED! Processing...");
-
-            // The media object is always inside the .message property of the wrapper
-            const mediaObj = viewOnceCheck.message;
-            if (!mediaObj) return;
-
-            const mediaType = Object.keys(mediaObj)[0]; // imageMessage or videoMessage
-
-            if (mediaType === 'imageMessage' || mediaType === 'videoMessage') {
+            // 2. Find the View-Once media inside the quoted message
+            const viewOnce = quotedMsg.viewOnceMessageV2 || quotedMsg.viewOnceMessage || quotedMsg.viewOnceMessageV2Extension;
+            const mediaObj = viewOnce ? viewOnce.message : quotedMsg; // Check if already unwrapped
+            
+            const mediaType = mediaObj.imageMessage ? 'imageMessage' : (mediaObj.videoMessage ? 'videoMessage' : null);
+            
+            if (mediaType) {
+                console.log(`🔓 Command triggered! Unlocking ${mediaType}...`);
                 try {
                     const stream = await downloadContentFromMessage(
                         mediaObj[mediaType], 
@@ -86,21 +71,21 @@ async function startBot() {
                         buffer = Buffer.concat([buffer, chunk]); 
                     }
 
-                    const myJid = sock.user.id.split(':')[0] + "@s.whatsapp.net";
-                    const isGroup = msg.key.remoteJid.endsWith('@g.us');
-                    
-                    const payload = {};
-                    payload[mediaType === 'imageMessage' ? 'image' : 'video'] = buffer;
-                    payload.caption = `🔓 *Anti-ViewOnce Success*\n👤 *From:* ${msg.pushName || 'User'}`;
+                    const content = {};
+                    content[mediaType === 'imageMessage' ? 'image' : 'video'] = buffer;
+                    content.caption = "🔓 *View-Once Unlocked via Command*";
 
-                    await sock.sendMessage(myJid, payload);
-                    console.log("🏁 SUCCESS: Forwarded to your DM.");
+                    // Send it back to the chat
+                    await sock.sendMessage(msg.key.remoteJid, content, { quoted: msg });
+                    console.log("✅ Sent.");
                 } catch (e) {
-                    console.log("❌ EXTRACTION ERROR:", e.message);
+                    console.log("❌ Command Error:", e.message);
                 }
+            } else {
+                console.log("ℹ️ No View-Once media found in that reply.");
             }
         }
     });
 }
 
-startBot().catch(err => console.error("Fatal Error:", err));
+startBot();
