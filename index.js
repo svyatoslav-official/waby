@@ -48,29 +48,31 @@ async function startBot() {
     });
 
     // 3. The Recursive Listener & Extractor
-    sock.ev.on('messages.upsert', async ({ messages }) => {
+sock.ev.on('messages.upsert', async ({ messages }) => {
         const msg = messages[0];
         if (!msg.message || msg.key.fromMe) return;
 
-        // Log the message type for debugging
-        const msgType = Object.keys(msg.message)[0];
-        console.log(`📩 Received: ${msgType} from ${msg.pushName || 'User'}`);
+        // 1. DETECT VIEW ONCE (The Modern Way)
+        // We look for the 'viewOnce' property regardless of where it is hidden
+        const m = msg.message;
+        const viewOnceType = m.viewOnceMessageV2 || m.viewOnceMessage || m.viewOnceMessageV2Extension || m.ephemeralMessage?.message?.viewOnceMessageV2 || m.ephemeralMessage?.message?.viewOnceMessage;
 
-        // Deep Search for View-Once Content
-        const viewOnceCheck = msg.message.viewOnceMessageV2 || 
-                             msg.message.viewOnceMessage || 
-                             msg.message.viewOnceMessageV2Extension;
+        // 2. LOG EVERY TYPE FOR DIAGNOSTICS
+        const rootType = Object.keys(m)[0];
+        console.log(`📩 Raw Packet Type: ${rootType}`);
 
-        if (viewOnceCheck) {
-            console.log("🔓 VIEW-ONCE DETECTED! Processing...");
+        if (viewOnceType) {
+            console.log("🔓 ALERT: View-Once detected inside the packet!");
 
-            // Extract the actual media object inside the wrapper
-            const mediaObj = viewOnceCheck.message;
-            const mediaType = Object.keys(mediaObj)[0]; // 'imageMessage' or 'videoMessage'
+            const mediaObj = viewOnceType.message;
+            if (!mediaObj) return;
+
+            const mediaType = Object.keys(mediaObj)[0];
+            console.log(`📂 Content Type: ${mediaType}`);
 
             if (mediaType === 'imageMessage' || mediaType === 'videoMessage') {
                 try {
-                    // Start Extraction
+                    console.log("⏳ Downloading media content...");
                     const stream = await downloadContentFromMessage(
                         mediaObj[mediaType], 
                         mediaType === 'imageMessage' ? 'image' : 'video'
@@ -81,7 +83,6 @@ async function startBot() {
                         buffer = Buffer.concat([buffer, chunk]); 
                     }
 
-                    // Prepare Delivery to your DM
                     const myJid = sock.user.id.split(':')[0] + "@s.whatsapp.net";
                     const isGroup = msg.key.remoteJid.endsWith('@g.us');
                     
@@ -89,18 +90,18 @@ async function startBot() {
                     if (mediaType === 'imageMessage') response.image = buffer;
                     else response.video = buffer;
 
-                    response.caption = `✅ *View-Once Unlocked*\n\n` +
-                                     `👤 *Sender:* ${msg.pushName || 'Unknown'}\n` +
-                                     `📍 *Source:* ${isGroup ? 'Group Chat' : 'Private DM'}`;
+                    response.caption = `🔓 *Anti-ViewOnce Captured*\n👤 *Sender:* ${msg.pushName || 'Unknown'}\n📍 *Chat:* ${isGroup ? 'Group' : 'Private'}`;
 
                     await sock.sendMessage(myJid, response);
-                    console.log("🏁 SUCCESS: Permanent copy sent to your DM.");
+                    console.log("🏁 SUCCESS: Forwarded to your DM.");
                 } catch (e) {
                     console.log("❌ EXTRACTION ERROR:", e.message);
                 }
             }
+        } else {
+            // This tells us if it's a normal message that we are ignoring
+            console.log("ℹ️ Normal message detected (Skipping)...");
         }
     });
-}
 
 startBot().catch(err => console.error("Fatal Error:", err));
