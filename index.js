@@ -4,61 +4,80 @@ const {
     delay, 
     downloadContentFromMessage, 
     fetchLatestBaileysVersion, 
-    Browsers 
+    Browsers,
+    DisconnectReason 
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 
 async function startBot() {
+    // 1. Setup session storage
     const { state, saveCreds } = await useMultiFileAuthState('auth_session');
     const { version } = await fetchLatestBaileysVersion();
     
+    // 2. Initialize connection
     const sock = makeWASocket({
         version,
         auth: state,
         logger: pino({ level: 'silent' }),
         printQRInTerminal: false,
-        browser: Browsers.macOS('Chrome')
+        browser: Browsers.macOS('Chrome'),
+        syncFullHistory: false
     });
 
-    // Pairing Logic
+    // 3. Pairing Code Logic (Your Number)
     if (!sock.authState.creds.registered) {
         const phoneNumber = "94723748044"; 
-        console.log("🕒 Handshaking...");
+        console.log("🕒 Waiting for server handshake...");
         await delay(6000); 
         try {
             const code = await sock.requestPairingCode(phoneNumber);
-            console.log("\n👉 PAIRING CODE:", code, "\n");
-        } catch (err) { console.log("Error: Try again in 1 hour."); }
+            console.log("\n==============================");
+            console.log("👉 YOUR PAIRING CODE:", code);
+            console.log("==============================\n");
+        } catch (err) {
+            console.log("❌ Request failed. Wait 1 hour.");
+        }
     }
 
+    // 4. Handle Credential Updates
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('connection.update', (up) => {
-        if (up.connection === 'open') console.log('✅ BOT ACTIVE: Monitoring DMs & Groups...');
+    // 5. Handle Connection Status
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect } = update;
+        if (connection === 'open') {
+            console.log('✅ BOT ACTIVE: Monitoring DMs & Groups...');
+        }
+        if (connection === 'close') {
+            const shouldReconnect = lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut;
+            if (shouldReconnect) startBot();
+        }
     });
 
+    // 6. Universal View-Once Bypass Logic
     sock.ev.on('messages.upsert', async ({ messages }) => {
         const m = messages[0];
-        // Ignore messages sent by you to avoid infinite loops
         if (!m.message || m.key.fromMe) return;
 
+        // Detection Logic
         const type = Object.keys(m.message)[0];
-        const isViewOnce = type === 'viewOnceMessageV2' || type === 'viewOnceMessage';
+        const msgContent = m.message[type];
+        
+        // Comprehensive check for View-Once flags
+        const isViewOnce = msgContent?.viewOnce || type === 'viewOnceMessageV2' || type === 'viewOnceMessage';
 
         if (isViewOnce) {
-            console.log("🔓 View-Once detected! Forwarding to your DM...");
-
-            // Get YOUR unique WhatsApp ID
-            const myID = sock.user.id.split(':')[0] + '@s.whatsapp.net'; 
-
-            const content = m.message[type].message;
-            const mediaType = Object.keys(content)[0]; 
+            console.log("🔓 View-Once Detected! Unlocking media...");
+            
+            // Extract media content regardless of wrapper type
+            const mediaData = m.message.viewOnceMessageV2?.message || m.message.viewOnceMessage?.message || m.message;
+            const mediaType = Object.keys(mediaData)[0]; 
             const isVideo = mediaType === 'videoMessage';
-
+            
             try {
-                // Download the media buffer
+                // Download the encrypted buffer
                 const stream = await downloadContentFromMessage(
-                    content[mediaType], 
+                    mediaData[mediaType], 
                     isVideo ? 'video' : 'image'
                 );
                 
@@ -67,21 +86,23 @@ async function startBot() {
                     buffer = Buffer.concat([buffer, chunk]); 
                 }
 
-                const senderName = m.pushName || "Unknown";
-                const location = m.key.remoteJid.includes('@g.us') ? "Group Chat" : "Private DM";
+                // Target your own "Message Yourself" chat
+                const myID = sock.user.id.split(':')[0] + '@s.whatsapp.net'; 
+                const senderName = m.pushName || "Unknown Sender";
+                const source = m.key.remoteJid.includes('@g.us') ? "Group Chat" : "Private DM";
 
-                // Send to YOURSELF (Message Yourself chat)
+                // Send the permanent copy to your personal DM
                 await sock.sendMessage(myID, { 
                     [isVideo ? 'video' : 'image']: buffer, 
-                    caption: `📂 *VIEW-ONCE CAPTURED*\n👤 From: ${senderName}\n📍 Source: ${location}`
+                    caption: `📂 *VAULT CAPTURE*\n👤 From: ${senderName}\n📍 Source: ${source}`
                 });
 
-                console.log(`✅ Success! Check your WhatsApp chat.`);
+                console.log(`✅ Forwarded to your DM.`);
             } catch (e) {
-                console.log("❌ Decryption failed:", e.message);
+                console.log("❌ Unlock Error:", e.message);
             }
         }
     });
 }
 
-startBot();
+startBot().catch(err => console.error("Fatal Error:", err));
