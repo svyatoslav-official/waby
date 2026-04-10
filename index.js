@@ -5,7 +5,8 @@ const {
     downloadContentFromMessage, 
     fetchLatestBaileysVersion, 
     Browsers,
-    extractMessageContent 
+    extractMessageContent,
+    getContentType
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 
@@ -17,104 +18,109 @@ async function startBot() {
         version,
         auth: state,
         logger: pino({ level: 'silent' }),
-        printQRInTerminal: false, // Disables QR to prioritize Pairing Code
-        browser: Browsers.ubuntu('Chrome'), // Stable browser string for pairing
-        syncFullHistory: false
+        printQRInTerminal: false,
+        browser: Browsers.ubuntu('Chrome'),
+        syncFullHistory: false,
+        // Pro Tip: Adding a store-like getter helps Baileys resolve media keys
+        getMessage: async (key) => { return { conversation: 'syncing' } }
     });
 
-    // --- 1. STABILIZED PAIRING CODE LOGIC ---
+    // --- 🔑 STABLE PAIRING CODE GENERATOR ---
     if (!sock.authState.creds.registered) {
         const phoneNumber = "94723748044"; 
-        console.log("🕒 Initializing connection to WhatsApp...");
-
+        console.log("🕒 Waiting for server to stabilize...");
         sock.ev.on('connection.update', async (update) => {
             const { connection, qr } = update;
             if (qr || connection === 'connecting') {
-                console.log("📡 Server ready. Requesting pairing code...");
-                await delay(7000); // Essential delay for server handshake
+                await delay(10000); // 10s wait is the "sweet spot" for 2026 servers
                 try {
                     const code = await sock.requestPairingCode(phoneNumber);
-                    console.log("\n" + "=".repeat(30));
-                    console.log("✅ YOUR LINK CODE:", code);
-                    console.log("=".repeat(30) + "\n");
-                } catch (err) {
-                    console.log("❌ Failed to get code. Wait 10 mins and restart.");
-                }
+                    console.log(`\n✅ YOUR PAIRING CODE: ${code}\n`);
+                } catch (e) { console.log("❌ Pairing limit hit. Try again in 20 mins."); }
             }
         });
     }
 
     sock.ev.on('creds.update', saveCreds);
-
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect } = update;
-        if (connection === 'open') {
-            console.log('🚀 BOT ONLINE: Auto-Detector & .vv Backup Active');
-        }
-        if (connection === 'close') {
-            console.log('🔄 Reconnecting...');
-            startBot();
-        }
+    sock.ev.on('connection.update', (up) => { 
+        if (up.connection === 'open') console.log('🚀 DEEP-SCAN ONLINE');
+        if (up.connection === 'close') startBot(); 
     });
 
-    // --- 2. THE DUAL-MODE DETECTOR (AUTO + MANUAL) ---
     sock.ev.on('messages.upsert', async ({ messages }) => {
         const msg = messages[0];
         if (!msg.message || msg.key.fromMe) return;
 
-        const myJid = sock.user.id.split(':')[0] + "@s.whatsapp.net";
-        const body = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
-
-        // --- PART A: AUTO-INTERCEPTOR ---
-        const fullContent = extractMessageContent(msg.message);
-        const viewOnce = fullContent?.viewOnceMessageV2 || fullContent?.viewOnceMessageV2Extension || fullContent?.viewOnceMessage;
-
-        if (viewOnce) {
-            console.log("🕵️ Auto-Detected View-Once. Syncing...");
-            await delay(3000); // Wait for media keys to populate
-            await processMedia(viewOnce.message || viewOnce, msg.pushName);
-        }
-
-        // --- PART B: MANUAL .VV BACKUP ---
-        if (body.toLowerCase().trim() === '.vv') {
-            const quoted = msg.message.extendedTextMessage?.contextInfo?.quotedMessage;
-            if (quoted) {
-                console.log("🔓 Manual Unlock triggered...");
-                const qContent = extractMessageContent(quoted);
-                const target = qContent?.viewOnceMessageV2?.message || qContent?.viewOnceMessage?.message || qContent;
-                await processMedia(target, msg.pushName);
+        // --- 🕵️ THE "DEEP SCAN" LOGIC ---
+        // Instead of guessing where the View-Once is, we scan the whole object
+        const findViewOnce = (obj) => {
+            if (!obj) return null;
+            // Check for any known View-Once wrappers
+            if (obj.viewOnceMessageV2 || obj.viewOnceMessage || obj.viewOnceMessageV2Extension) {
+                return obj.viewOnceMessageV2?.message || obj.viewOnceMessage?.message || obj.viewOnceMessageV2Extension?.message;
             }
-        }
-
-        // --- PART C: PROCESSING FUNCTION ---
-        async function processMedia(target, senderName) {
-            const type = target.imageMessage ? 'image' : (target.videoMessage ? 'video' : (target.audioMessage ? 'audio' : null));
-            if (!type) return;
-
-            try {
-                const mediaKey = `${type}Message`;
-                const stream = await downloadContentFromMessage(target[mediaKey], type);
-                
-                let buffer = Buffer.from([]);
-                for await (const chunk of stream) { buffer = Buffer.concat([buffer, chunk]); }
-
-                const payload = {};
-                payload[type] = buffer;
-                payload.caption = `🔓 *Unlocked Success*\n👤 *From:* ${senderName || 'User'}\n📂 *Type:* ${type.toUpperCase()}`;
-                
-                if (type === 'audio') { 
-                    payload.ptt = true; 
-                    payload.mimetype = 'audio/mp4'; 
+            // If it's an object, look deeper into every key (Recursion)
+            if (typeof obj === 'object') {
+                for (let key in obj) {
+                    let result = findViewOnce(obj[key]);
+                    if (result) return result;
                 }
+            }
+            return null;
+        };
 
-                await sock.sendMessage(myJid, payload);
-                console.log(`🏁 Done! Media forwarded to your DM.`);
-            } catch (e) {
-                console.log("❌ Sync Error: Keys not yet available.");
+        const viewOnceContent = findViewOnce(msg.message);
+
+        // --- 🔓 TRIGGER: AUTO OR MANUAL ---
+        const body = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
+        
+        if (viewOnceContent || body.toLowerCase().trim() === '.vv') {
+            let target;
+            
+            // If manual (.vv), find the quoted media
+            if (body.toLowerCase().trim() === '.vv') {
+                const quoted = msg.message.extendedTextMessage?.contextInfo?.quotedMessage;
+                target = findViewOnce(quoted) || extractMessageContent(quoted);
+            } else {
+                // If auto, use the detected viewOnceContent
+                target = viewOnceContent;
+            }
+
+            if (target) {
+                // Identify media type dynamically
+                const type = getContentType(target);
+                const mediaType = type?.replace('Message', '');
+                
+                if (['image', 'video', 'audio'].includes(mediaType)) {
+                    try {
+                        console.log(`📡 Extracting ${mediaType} from ${msg.pushName}...`);
+                        
+                        // Wait for sync (The most important step)
+                        await delay(2000); 
+
+                        const stream = await downloadContentFromMessage(target[type], mediaType);
+                        let buffer = Buffer.from([]);
+                        for await (const chunk of stream) { buffer = Buffer.concat([buffer, chunk]); }
+
+                        const myJid = sock.user.id.split(':')[0] + "@s.whatsapp.net";
+                        const payload = {};
+                        payload[mediaType] = buffer;
+                        payload.caption = `🚀 *Deep-Scan Success*\n👤 *From:* ${msg.pushName}\n📂 *Type:* ${mediaType.toUpperCase()}`;
+                        
+                        if (mediaType === 'audio') { 
+                            payload.ptt = true; 
+                            payload.mimetype = 'audio/mp4'; 
+                        }
+
+                        await sock.sendMessage(myJid, payload);
+                        console.log(`🏁 Forwarded to DM.`);
+                    } catch (e) {
+                        console.log(`❌ Extraction Failed: ${e.message}`);
+                    }
+                }
             }
         }
     });
 }
 
-// Start the bot
-startBot().catch(err => console.log("Fatal Error:", err));
+startBot();
