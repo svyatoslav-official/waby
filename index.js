@@ -5,8 +5,7 @@ const {
     downloadContentFromMessage, 
     fetchLatestBaileysVersion, 
     Browsers,
-    normalizeMessageContent,
-    getContentType
+    normalizeMessageContent 
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 
@@ -19,109 +18,79 @@ async function startBot() {
         auth: state,
         logger: pino({ level: 'silent' }),
         printQRInTerminal: false,
-        browser: Browsers.ubuntu('Chrome'), // Best for Pairing Code stability
+        browser: Browsers.ubuntu('Chrome'), // Fixed browser for 2026 stability
         syncFullHistory: false,
-        // Helps the bot "pull" missing keys from the server during sync
         getMessage: async (key) => { return { conversation: 'syncing' } }
     });
 
-    // --- 🔑 STABILIZED PAIRING CODE SOLICITOR ---
+    // 🔑 THE PAIRING CODE SOLICITOR (Improved)
     if (!sock.authState.creds.registered) {
         const phoneNumber = "94723748044"; 
-        console.log("🕒 Initializing... Waiting for server handshake window.");
-        
-        sock.ev.on('connection.update', async (update) => {
-            const { connection, qr } = update;
-            if (qr || connection === 'connecting') {
-                await delay(10000); // 10s wait is the sweet spot for 2026 servers
+        sock.ev.on('connection.update', async (up) => {
+            if (up.qr || up.connection === 'connecting') {
+                await delay(10000); 
                 try {
                     const code = await sock.requestPairingCode(phoneNumber);
-                    console.log(`\n✅ YOUR LINK CODE: ${code}\n`);
-                } catch (e) {
-                    console.log("❌ Server busy. Restart the bot and try again.");
-                }
+                    console.log(`\n✅ LINK CODE: ${code}\n`);
+                } catch (e) { console.log("❌ Retry in 30s..."); }
             }
         });
     }
 
     sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('connection.update', (u) => { if (u.connection === 'open') console.log('🚀 SYSTEM ONLINE'); if (u.connection === 'close') startBot(); });
 
-    sock.ev.on('connection.update', (up) => {
-        if (up.connection === 'open') console.log('🚀 SYSTEM ONLINE: Auto-Detecting View-Once...');
-        if (up.connection === 'close') startBot();
-    });
-
+    // 🕵️ THE "LOG-BASED" AUTO-INTERCEPTOR
     sock.ev.on('messages.upsert', async ({ messages }) => {
         const msg = messages[0];
-        if (!msg.message) return; // Note: removed fromMe check so you can test it yourself
+        if (!msg.message) return;
 
-        const m = msg.message;
-        const body = m.conversation || m.extendedTextMessage?.text || "";
+        // 1. NORMALIZE & SCAN (Fixes the "Internal Flag" problem from your logs)
+        const content = normalizeMessageContent(msg.message);
+        const rawJson = JSON.stringify(content);
         
-        // 1. ADVANCED DETECTION (Based on your Study Logs)
-        const findVO = (obj) => {
-            if (!obj) return null;
-            // Check for VO wrappers or internal "viewOnce" flags found in your logs
-            const isVO = obj.viewOnceMessageV2 || obj.viewOnceMessage || obj.viewOnceMessageV2Extension;
-            const content = isVO ? (isVO.message || isVO) : obj;
+        // Look for the View-Once flag anywhere in the data
+        const isViewOnce = rawJson.includes('"viewOnce":true') || rawJson.includes('viewOnceMessage');
+
+        if (isViewOnce) {
+            console.log("🎯 TARGET DETECTED: Starting Deep-Sync Loop...");
             
-            const media = content.imageMessage || content.videoMessage || content.audioMessage;
-            if (media?.viewOnce || isVO) return content;
-            return null;
-        };
-
-        const targetContent = findVO(m);
-
-        // 2. TRIGGER: Auto-Intercept OR Manual .vv
-        if (targetContent || body.toLowerCase().trim() === '.vv') {
-            console.log("🔓 Target Detected. Waiting for Decryption Keys...");
-            
-            let target = targetContent;
-            
-            // Fallback for manual .vv command
-            if (body.toLowerCase().trim() === '.vv') {
-                const quoted = m.extendedTextMessage?.contextInfo?.quotedMessage;
-                const normalized = normalizeMessageContent(quoted);
-                target = findVO(normalized) || normalized;
-            }
-
-            if (!target) return;
-
-            const type = target.imageMessage ? 'image' : (target.videoMessage ? 'video' : (target.audioMessage ? 'audio' : null));
-            if (!type) return;
-
-            // 3. THE "KEY-WAIT" RETRY LOOP
-            // We try 3 times to ensure the Signal Handshake (APP_STATE_SYNC) finishes
-            for (let i = 0; i < 3; i++) {
+            // 2. THE SYNC LOOP (Fixes the "Missing Key" problem)
+            for (let i = 0; i < 5; i++) {
                 try {
-                    await delay(3000); // 3s wait per attempt
-                    const mediaData = target[`${type}Message`];
+                    console.log(`📡 Syncing Decryption Keys (Attempt ${i+1}/5)...`);
                     
-                    const stream = await downloadContentFromMessage(mediaData, type);
-                    let buffer = Buffer.from([]);
-                    for await (const chunk of stream) { buffer = Buffer.concat([buffer, chunk]); }
+                    // Find the media object inside the message
+                    const target = content.viewOnceMessageV2?.message || 
+                                   content.viewOnceMessage?.message || 
+                                   content.imageMessage || 
+                                   content.videoMessage || 
+                                   content.audioMessage;
 
-                    if (buffer.length > 50) {
-                        const myJid = sock.user.id.split(':')[0] + "@s.whatsapp.net";
-                        const payload = {
-                            [type]: buffer,
-                            caption: `🚀 *Auto-Intercept Success*\n👤 *From:* ${msg.pushName || 'User'}\n📂 *Type:* ${type.toUpperCase()}`
-                        };
+                    const type = target?.imageMessage ? 'image' : (target?.videoMessage ? 'video' : (target?.audioMessage ? 'audio' : null));
+
+                    if (type) {
+                        const mediaData = target[`${type}Message`] || target;
                         
-                        if (type === 'audio') { 
-                            payload.ptt = true; 
-                            payload.mimetype = 'audio/mp4'; 
-                        }
+                        // Download as stream (More stable for 2026)
+                        const stream = await downloadContentFromMessage(mediaData, type);
+                        let buffer = Buffer.from([]);
+                        for await (const chunk of stream) { buffer = Buffer.concat([buffer, chunk]); }
 
-                        await sock.sendMessage(myJid, payload);
-                        console.log(`🏁 Done: ${type} forwarded to DM.`);
-                        return; // Exit on success
+                        if (buffer.length > 100) { 
+                            const myJid = sock.user.id.split(':')[0] + "@s.whatsapp.net";
+                            await sock.sendMessage(myJid, { 
+                                [type]: buffer, 
+                                caption: `🚀 *Auto-Intercept Success*\n👤 *From:* ${msg.pushName}\n📂 *Type:* ${type.toUpperCase()}` 
+                            });
+                            console.log(`🏁 SUCCESS: Decrypted and forwarded.`);
+                            return; // Stop the loop on success
+                        }
                     }
-                } catch (e) {
-                    console.log(`📡 Syncing keys (Attempt ${i+1})...`);
-                }
+                } catch (e) { /* Wait for next sync attempt */ }
+                await delay(2500); // Wait 2.5 seconds between tries for keys to arrive
             }
-            console.log("❌ Exhausted: Server refused to send decryption keys.");
+            console.log("❌ FAILED: The server never sent the second key (Message Secret).");
         }
     });
 }
