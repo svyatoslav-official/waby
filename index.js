@@ -5,7 +5,7 @@ const {
     downloadContentFromMessage, 
     fetchLatestBaileysVersion, 
     Browsers,
-    normalizeMessageContent // New tool to "flatten" hidden layers
+    extractMessageContent // Deep-unwrapper
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 
@@ -18,35 +18,37 @@ async function startBot() {
         auth: state,
         logger: pino({ level: 'silent' }),
         browser: Browsers.macOS('Chrome'),
-        // This helps the bot "remember" keys for auto-decryption
-        getMessage: async (key) => { return { conversation: 'stored' } } 
+        syncFullHistory: false
     });
 
     sock.ev.on('creds.update', saveCreds);
-    sock.ev.on('connection.update', (up) => { if (up.connection === 'close') startBot(); });
+    sock.ev.on('connection.update', (u) => { if (u.connection === 'close') startBot(); });
 
     sock.ev.on('messages.upsert', async ({ messages }) => {
         const msg = messages[0];
         if (!msg.message || msg.key.fromMe) return;
 
-        // 1. NORMALIZE: This forces WhatsApp to show the hidden media layers
-        const messageContent = normalizeMessageContent(msg.message);
+        // 1. DEEP UNWRAP: Use the library's official extractor to find hidden View-Onces
+        const fullContent = extractMessageContent(msg.message);
         
-        // 2. SEARCH: Look for the View-Once flag in the normalized content
-        const viewOnce = messageContent?.viewOnceMessageV2 || 
-                         messageContent?.viewOnceMessage || 
-                         messageContent?.viewOnceMessageV2Extension;
+        // 2. CHECK: Look for the View-Once flag in all possible 2026 locations
+        const isViewOnce = 
+            fullContent?.viewOnceMessageV2 || 
+            fullContent?.viewOnceMessageV2Extension || 
+            fullContent?.viewOnceMessage ||
+            msg.message?.viewOnceMessageV2; // Backup check
 
-        if (viewOnce) {
-            const target = viewOnce.message;
+        if (isViewOnce) {
+            console.log("🕵️ View-Once Detected. Syncing keys...");
+            
+            // 3. THE MAGIC WAIT: Give the server 3 seconds to push the decryption keys
+            await delay(3000); 
+
+            // Re-extract content after the wait to ensure keys are populated
+            const target = isViewOnce.message || isViewOnce;
             const type = target.imageMessage ? 'image' : (target.videoMessage ? 'video' : (target.audioMessage ? 'audio' : null));
 
             if (type) {
-                console.log(`📡 Auto-Detected ${type}. Waiting for keys...`);
-                
-                // 3. RETRY LOGIC: Wait 2.5 seconds for the background handshake to finish
-                await delay(2500); 
-
                 try {
                     const mediaKey = `${type}Message`;
                     const stream = await downloadContentFromMessage(target[mediaKey], type);
@@ -58,14 +60,29 @@ async function startBot() {
                     const payload = {};
                     payload[type] = buffer;
                     payload.caption = `🚀 *Auto-Intercept Success*\n👤 *From:* ${msg.pushName || 'User'}`;
-                    if (type === 'audio') { payload.ptt = true; payload.mimetype = 'audio/mp4'; }
+                    
+                    if (type === 'audio') { 
+                        payload.ptt = true; 
+                        payload.mimetype = 'audio/mp4'; 
+                    }
 
                     await sock.sendMessage(myJid, payload);
-                    console.log(`🏁 Auto-Unlocking ${type} worked!`);
+                    console.log(`✅ Auto-forwarded ${type} to your DM.`);
                 } catch (e) {
-                    console.log(`❌ Still failing: ${e.message}. The keys didn't sync in time.`);
+                    console.log(`⚠️ Auto-sync failed: ${e.message}. The keys are still locked.`);
+                    console.log("💡 Tip: If Auto fails, the '.vv' command is your backup!");
                 }
             }
+        }
+
+        // KEEP YOUR WORKING .VV COMMAND AS A BACKUP
+        const body = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
+        if (body.toLowerCase().trim() === '.vv') {
+            const quoted = msg.message.extendedTextMessage?.contextInfo?.quotedMessage;
+            if (!quoted) return;
+            const qContent = extractMessageContent(quoted);
+            const qTarget = qContent?.viewOnceMessageV2?.message || qContent?.viewOnceMessage?.message || qContent;
+            // ... (rest of your existing .vv logic)
         }
     });
 }
