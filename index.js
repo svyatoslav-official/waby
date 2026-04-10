@@ -17,7 +17,8 @@ async function startBot() {
         version,
         auth: state,
         logger: pino({ level: 'silent' }),
-        browser: Browsers.macOS('Chrome')
+        // Updated browser fingerprint here
+        browser: Browsers.ubuntu('Chrome')
     });
 
     // Pairing / Handshake
@@ -30,7 +31,7 @@ async function startBot() {
 
     sock.ev.on('creds.update', saveCreds);
     sock.ev.on('connection.update', (up) => { 
-        if (up.connection === 'open') console.log('🚀 BOT ONLINE: Universal Media Unlocker Ready');
+        if (up.connection === 'open') console.log('🚀 BOT ONLINE: Ubuntu Chrome Session Active');
         if (up.connection === 'close') startBot(); 
     });
 
@@ -38,28 +39,23 @@ async function startBot() {
         const msg = messages[0];
         if (!msg.message) return;
 
-        // Extract body - check if there is any text sent
         const body = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
         const quoted = msg.message.extendedTextMessage?.contextInfo?.quotedMessage;
 
-        // TRIGGER LOGIC: If there is a body (any letter/word) AND a quoted message exists
+        // Trigger on any text if a message is quoted
         if (body.length > 0 && quoted) {
-            
-            // Unwrapping View-Once layers
             const viewOnce = quoted.viewOnceMessageV2 || quoted.viewOnceMessage || quoted.viewOnceMessageV2Extension;
             const target = viewOnce ? viewOnce.message : quoted;
 
-            // Detection logic
             const mediaType = 
                 target.imageMessage ? 'image' : 
                 target.videoMessage ? 'video' : 
                 target.audioMessage ? 'audio' : 
                 target.documentMessage ? 'document' : null;
 
-            // Only proceed if the quoted message actually contains media
             if (mediaType) {
                 try {
-                    console.log(`🔓 Unlocking ${mediaType} triggered by: "${body}"`);
+                    console.log(`🔓 Unlocking ${mediaType}...`);
                     
                     const mediaKey = `${mediaType}Message`;
                     const stream = await downloadContentFromMessage(target[mediaKey], mediaType);
@@ -83,12 +79,10 @@ async function startBot() {
                         payload.fileName = target.documentMessage.fileName || 'unlocked_file';
                     }
 
-                    payload.caption = `🔓 *Universal Unlock Success*\n📂 *Type:* ${mediaType.toUpperCase()}\n👤 *Triggered by:* ${msg.pushName}\n💬 *Text used:* ${body}`;
+                    payload.caption = `🔓 *Universal Unlock Success*\n📂 *Type:* ${mediaType.toUpperCase()}\n👤 *User:* ${msg.pushName}`;
 
-                    // Send to your private DM
                     await sock.sendMessage(myJid, payload);
-                    
-                    console.log(`🏁 ${mediaType.toUpperCase()} sent to private DM.`);
+                    console.log(`🏁 ${mediaType.toUpperCase()} sent.`);
                 } catch (e) { 
                     console.log("❌ Extraction Error:", e.message); 
                 }
