@@ -4,7 +4,8 @@ const {
     delay, 
     downloadContentFromMessage, 
     fetchLatestBaileysVersion, 
-    Browsers
+    Browsers,
+    normalizeMessageContent // New tool to "flatten" hidden layers
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 
@@ -16,65 +17,53 @@ async function startBot() {
         version,
         auth: state,
         logger: pino({ level: 'silent' }),
-        browser: Browsers.macOS('Chrome')
+        browser: Browsers.macOS('Chrome'),
+        // This helps the bot "remember" keys for auto-decryption
+        getMessage: async (key) => { return { conversation: 'stored' } } 
     });
-
-    if (!sock.authState.creds.registered) {
-        const phoneNumber = "94723748044"; 
-        await delay(6000); 
-        const code = await sock.requestPairingCode(phoneNumber);
-        console.log(`\n✅ LINKING CODE: ${code}\n`);
-    }
 
     sock.ev.on('creds.update', saveCreds);
-    sock.ev.on('connection.update', (up) => { 
-        if (up.connection === 'open') console.log('🚀 AUTO-INTERCEPTOR ONLINE');
-        if (up.connection === 'close') startBot(); 
-    });
+    sock.ev.on('connection.update', (up) => { if (up.connection === 'close') startBot(); });
 
     sock.ev.on('messages.upsert', async ({ messages }) => {
         const msg = messages[0];
         if (!msg.message || msg.key.fromMe) return;
 
-        // --- 🕵️ AUTO-DETECTION LOGIC ---
-        // Look for any version of the View-Once wrapper
-        const viewOnce = msg.message.viewOnceMessageV2 || msg.message.viewOnceMessage || msg.message.viewOnceMessageV2Extension;
+        // 1. NORMALIZE: This forces WhatsApp to show the hidden media layers
+        const messageContent = normalizeMessageContent(msg.message);
         
-        if (viewOnce) {
-            const target = viewOnce.message; // Go inside the "hidden" folder
-            const mediaType = 
-                target.imageMessage ? 'image' : 
-                target.videoMessage ? 'video' : 
-                target.audioMessage ? 'audio' : null;
+        // 2. SEARCH: Look for the View-Once flag in the normalized content
+        const viewOnce = messageContent?.viewOnceMessageV2 || 
+                         messageContent?.viewOnceMessage || 
+                         messageContent?.viewOnceMessageV2Extension;
 
-            if (mediaType) {
+        if (viewOnce) {
+            const target = viewOnce.message;
+            const type = target.imageMessage ? 'image' : (target.videoMessage ? 'video' : (target.audioMessage ? 'audio' : null));
+
+            if (type) {
+                console.log(`📡 Auto-Detected ${type}. Waiting for keys...`);
+                
+                // 3. RETRY LOGIC: Wait 2.5 seconds for the background handshake to finish
+                await delay(2500); 
+
                 try {
-                    console.log(`📸 Auto-Intercepting View-Once ${mediaType} from ${msg.pushName}...`);
-                    
-                    const mediaKey = `${mediaType}Message`;
-                    const stream = await downloadContentFromMessage(target[mediaKey], mediaType);
+                    const mediaKey = `${type}Message`;
+                    const stream = await downloadContentFromMessage(target[mediaKey], type);
                     
                     let buffer = Buffer.from([]);
                     for await (const chunk of stream) { buffer = Buffer.concat([buffer, chunk]); }
 
                     const myJid = sock.user.id.split(':')[0] + "@s.whatsapp.net";
                     const payload = {};
+                    payload[type] = buffer;
+                    payload.caption = `🚀 *Auto-Intercept Success*\n👤 *From:* ${msg.pushName || 'User'}`;
+                    if (type === 'audio') { payload.ptt = true; payload.mimetype = 'audio/mp4'; }
 
-                    if (mediaType === 'image') payload.image = buffer;
-                    else if (mediaType === 'video') payload.video = buffer;
-                    else if (mediaType === 'audio') {
-                        payload.audio = buffer;
-                        payload.mimetype = 'audio/mp4';
-                        payload.ptt = true; 
-                    }
-
-                    payload.caption = `🚀 *AUTO-INTERCEPT SUCCESS*\n👤 *From:* ${msg.pushName}\n📂 *Type:* ${mediaType.toUpperCase()}`;
-
-                    // Send the decrypted file to your own chat
                     await sock.sendMessage(myJid, payload);
-                    console.log(`🏁 Successfully saved to DM.`);
-                } catch (e) { 
-                    console.log("❌ Auto-Extraction Failed:", e.message); 
+                    console.log(`🏁 Auto-Unlocking ${type} worked!`);
+                } catch (e) {
+                    console.log(`❌ Still failing: ${e.message}. The keys didn't sync in time.`);
                 }
             }
         }
