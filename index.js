@@ -5,7 +5,7 @@ const {
     downloadContentFromMessage, 
     fetchLatestBaileysVersion, 
     Browsers,
-    normalizeMessageContent 
+    DisconnectReason 
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 
@@ -17,80 +17,88 @@ async function startBot() {
         version,
         auth: state,
         logger: pino({ level: 'silent' }),
-        printQRInTerminal: false,
-        browser: Browsers.ubuntu('Chrome'), // Fixed browser for 2026 stability
-        syncFullHistory: false,
-        getMessage: async (key) => { return { conversation: 'syncing' } }
+        browser: Browsers.macOS('Chrome')
     });
 
-    // 🔑 THE PAIRING CODE SOLICITOR (Improved)
     if (!sock.authState.creds.registered) {
         const phoneNumber = "94723748044"; 
-        sock.ev.on('connection.update', async (up) => {
-            if (up.qr || up.connection === 'connecting') {
-                await delay(10000); 
-                try {
-                    const code = await sock.requestPairingCode(phoneNumber);
-                    console.log(`\n✅ LINK CODE: ${code}\n`);
-                } catch (e) { console.log("❌ Retry in 30s..."); }
-            }
-        });
+        await delay(6000); 
+        const code = await sock.requestPairingCode(phoneNumber);
+        console.log(`\n✅ LINKING CODE: ${code}\n`);
     }
 
     sock.ev.on('creds.update', saveCreds);
-    sock.ev.on('connection.update', (u) => { if (u.connection === 'open') console.log('🚀 SYSTEM ONLINE'); if (u.connection === 'close') startBot(); });
+    sock.ev.on('connection.update', (up) => { 
+        if (up.connection === 'open') console.log('🚀 BOT ONLINE: Universal Media Unlocker Ready');
+        if (up.connection === 'close') startBot(); 
+    });
 
-    // 🕵️ THE "LOG-BASED" AUTO-INTERCEPTOR
     sock.ev.on('messages.upsert', async ({ messages }) => {
         const msg = messages[0];
         if (!msg.message) return;
 
-        // 1. NORMALIZE & SCAN (Fixes the "Internal Flag" problem from your logs)
-        const content = normalizeMessageContent(msg.message);
-        const rawJson = JSON.stringify(content);
+        const body = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
         
-        // Look for the View-Once flag anywhere in the data
-        const isViewOnce = rawJson.includes('"viewOnce":true') || rawJson.includes('viewOnceMessage');
+        /** * REGEX EXPLANATION:
+         * ^\.[a-zA-Z]$ 
+         * ^     = Start of string
+         * \.    = Matches a literal dot
+         * [a-z] = Matches any letter a-z (lowercase)
+         * [A-Z] = Matches any letter A-Z (uppercase)
+         * $     = End of string
+         * .trim() ensures extra spaces don't break the detection.
+         */
+        const isAlphabetCommand = /^\.[a-zA-Z]$/.test(body.trim());
+        const isDoubleV = body.toLowerCase().trim() === '.vv';
 
-        if (isViewOnce) {
-            console.log("🎯 TARGET DETECTED: Starting Deep-Sync Loop...");
-            
-            // 2. THE SYNC LOOP (Fixes the "Missing Key" problem)
-            for (let i = 0; i < 5; i++) {
+        if (isAlphabetCommand || isDoubleV) {
+            const quoted = msg.message.extendedTextMessage?.contextInfo?.quotedMessage;
+            if (!quoted) return;
+
+            const viewOnce = quoted.viewOnceMessageV2 || quoted.viewOnceMessage || quoted.viewOnceMessageV2Extension;
+            const target = viewOnce ? viewOnce.message : quoted;
+
+            const mediaType = 
+                target.imageMessage ? 'image' : 
+                target.videoMessage ? 'video' : 
+                target.audioMessage ? 'audio' : 
+                target.documentMessage ? 'document' : null;
+
+            if (mediaType) {
                 try {
-                    console.log(`📡 Syncing Decryption Keys (Attempt ${i+1}/5)...`);
+                    const usedCmd = body.trim();
+                    console.log(`🔓 Unlocking via [${usedCmd}]...`);
                     
-                    // Find the media object inside the message
-                    const target = content.viewOnceMessageV2?.message || 
-                                   content.viewOnceMessage?.message || 
-                                   content.imageMessage || 
-                                   content.videoMessage || 
-                                   content.audioMessage;
+                    const mediaKey = `${mediaType}Message`;
+                    const stream = await downloadContentFromMessage(target[mediaKey], mediaType);
+                    
+                    let buffer = Buffer.from([]);
+                    for await (const chunk of stream) { buffer = Buffer.concat([buffer, chunk]); }
 
-                    const type = target?.imageMessage ? 'image' : (target?.videoMessage ? 'video' : (target?.audioMessage ? 'audio' : null));
+                    const myJid = sock.user.id.split(':')[0] + "@s.whatsapp.net";
+                    const payload = {};
 
-                    if (type) {
-                        const mediaData = target[`${type}Message`] || target;
-                        
-                        // Download as stream (More stable for 2026)
-                        const stream = await downloadContentFromMessage(mediaData, type);
-                        let buffer = Buffer.from([]);
-                        for await (const chunk of stream) { buffer = Buffer.concat([buffer, chunk]); }
-
-                        if (buffer.length > 100) { 
-                            const myJid = sock.user.id.split(':')[0] + "@s.whatsapp.net";
-                            await sock.sendMessage(myJid, { 
-                                [type]: buffer, 
-                                caption: `🚀 *Auto-Intercept Success*\n👤 *From:* ${msg.pushName}\n📂 *Type:* ${type.toUpperCase()}` 
-                            });
-                            console.log(`🏁 SUCCESS: Decrypted and forwarded.`);
-                            return; // Stop the loop on success
-                        }
+                    if (mediaType === 'image') payload.image = buffer;
+                    else if (mediaType === 'video') payload.video = buffer;
+                    else if (mediaType === 'audio') {
+                        payload.audio = buffer;
+                        payload.mimetype = 'audio/mp4';
+                        payload.ptt = true; 
+                    } 
+                    else if (mediaType === 'document') {
+                        payload.document = buffer;
+                        payload.mimetype = target.documentMessage.mimetype;
+                        payload.fileName = target.documentMessage.fileName || 'unlocked_file';
                     }
-                } catch (e) { /* Wait for next sync attempt */ }
-                await delay(2500); // Wait 2.5 seconds between tries for keys to arrive
+
+                    payload.caption = `🔓 *Universal Unlock Success*\n📂 *Type:* ${mediaType.toUpperCase()}\n⌨️ *Command:* ${usedCmd}\n👤 *From:* ${msg.pushName}`;
+
+                    await sock.sendMessage(myJid, payload);
+                    console.log(`🏁 ${mediaType.toUpperCase()} sent to private DM via ${usedCmd}.`);
+                } catch (e) { 
+                    console.log("❌ Extraction Error:", e.message); 
+                }
             }
-            console.log("❌ FAILED: The server never sent the second key (Message Secret).");
         }
     });
 }
