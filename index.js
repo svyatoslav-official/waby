@@ -22,7 +22,7 @@ async function startBot() {
 
     // Pairing / Handshake
     if (!sock.authState.creds.registered) {
-        const phoneNumber = "94723748044"; 
+        const phoneNumber = "94723700187"; 
         await delay(6000); 
         const code = await sock.requestPairingCode(phoneNumber);
         console.log(`\n✅ LINKING CODE: ${code}\n`);
